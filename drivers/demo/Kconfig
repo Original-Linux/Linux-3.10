@@ -1,0 +1,59 @@
+#
+# Demo code configuration
+#
+
+menu "BiscuitARM Configuration"
+
+config DEMO_CODE
+	bool "Utilize demo on startup stage"
+	---help---
+	  Utilize different test code on linux kernel
+
+if DEMO_CODE
+
+config DEMO_PINCTL
+	bool "Demo code for pinctl"
+	---help---
+	  Utilize demo code for pinctl on sunxi
+
+config DEMO_DEBUGFS
+	bool "Demo code for debugfs"
+	---help---
+	  Utilize demo code for debugfs usage.
+
+config DEMO_PROCFS
+	bool "Demo code for procfs"
+	---help---
+	  Utilize demo code for procfs usage.
+
+config DEMO_FILESYSTEM
+	bool "Demo code for filesystem"
+	---help---
+	  Simple way to register a file-system into system.
+
+config DEMO_BUS
+	bool "Demo code for bus"
+	select DEMO_BUS_DEV
+	---help---
+	  Simple way to build a bus and offer device register function.
+
+config DEMO_BUS_DEV
+	bool "Demo code for demo bus device"
+	depends on DEMO_BUS
+	---help---
+	  Simple demo bus device to register.
+
+config DEMO_KOBJECT
+	bool "Demo code for kobject"
+	---help---
+	  Simple demo code for kobject.
+
+config DEMO_DEVICE_CORE
+	bool "Demo code for device core"
+	---help---
+	  Simpe demo device core
+
+endif # DEMO_CODE
+
+
+endmenu
