@@ -16,10 +16,10 @@ struct kobject *demo_virtual_device_parent(struct demo_device *dev)
 {
     static struct kobject *virtual_dir = NULL;
 
-    if (!vitual_dir)
-        vitual_dir = kobject_create_and_add("demo_vitual",
+    if (!virtual_dir)
+        virtual_dir = kobject_create_and_add("demo_vitual",
                      &demo_devices_kset->kobj);
-    return vitual_dir;
+    return virtual_dir;
 }
 
 /* initialize entry */

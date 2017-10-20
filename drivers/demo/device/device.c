@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 
 #include <linux/sysfs.h>
+#include <linux/kdev_t.h>
 
 #include "device.h"
 
@@ -402,7 +403,7 @@ static int demo_device_add_attributes(struct demo_device *dev,
     return error;
 }
 
-static void demo_device_remove_attributes(struct device *dev,
+static void demo_device_remove_attributes(struct demo_device *dev,
             struct demo_device_attribute *attrs)
 {
     int i;
@@ -539,6 +540,134 @@ int demo_device_bind_driver(struct demo_device *dev)
     return ret;
 }
 
+static ssize_t demo_show_dev(struct demo_device *dev, 
+               struct demo_device_attribute *attr, char *buf)
+{
+    return print_dev_t(buf, dev->devt);
+}
+
+static struct demo_device_attribute demo_devt_attr =
+    __ATTR(demo_dev, S_IRUGO, demo_show_dev, NULL);
+
+static ssize_t demo_show_uevent(struct demo_device *dev,
+               struct demo_device_attribute *attr, char *buf)
+{
+    struct kobject *top_kobj;
+    struct kset *kset;
+    struct kobj_uevent_env *env = NULL;
+    int i;
+    size_t count = 0;
+    int retval;
+
+    /* search the kset, the device belongs to */
+    top_kobj = &dev->kobj;
+    while (!top_kobj->kset && top_kobj->parent)
+        top_kobj = top_kobj->parent;
+    if (!top_kobj->kset)
+        goto out;
+
+    kset = top_kobj->kset;
+    if (!kset->uevent_ops || !kset->uevent_ops->uevent)
+        goto out;
+
+    /* respect filter */
+    if (kset->uevent_ops || !kset->uevent_ops->uevent)
+        goto out;
+
+    /* respect filter */
+    if (kset->uevent_ops && kset->uevent_ops->filter)
+        if (!kset->uevent_ops->filter(kset, &dev->kobj))
+            goto out;
+
+    env = kzalloc(sizeof(struct kobj_uevent_env), GFP_KERNEL);
+    if (!env)
+        return -ENOMEM;
+
+    /* let the kset specify function add its keys */
+    retval = kset->uevent_ops->uevent(kset, &dev->kobj, env);
+    if (retval)
+        goto out;
+
+    /* copy keys to file */
+    for (i = 0; i < env->envp_idx; i++)
+        count += sprintf(&buf[count], "%s\n", env->envp[i]);
+out:
+    kfree(env);
+    return count;
+}
+
+static ssize_t demo_store_uevent(struct demo_device *dev, 
+       struct demo_device_attribute *attr, const char *buf, size_t count)
+{
+    enum kobject_action action;
+
+    if (kobject_action_type(buf, count, &action) == 0)
+        kobject_uevent(&dev->kobj, action);
+    else
+        printk(KERN_ERR "%s uevent: unknow action-string.\n",
+                      demo_dev_name(dev));
+    return count;
+}
+
+static struct demo_device_attribute demo_uevent_attr = 
+     __ATTR(demo_uevent, S_IRUGO | S_IWUSR, 
+            demo_show_uevent, demo_store_uevent);
+
+static void demo_device_remove_attrs(struct demo_device *dev)
+{
+    struct demo_class *class = dev->class;
+    const struct demo_device_type *type = dev->type;
+
+    demo_device_remove_groups(dev, dev->groups);
+
+    if (type)
+        demo_device_remove_groups(dev, type->groups);
+
+    if (class) {
+        demo_device_remove_attributes(dev, class->dev_attrs);
+        demo_device_remove_bin_attributes(dev, class->dev_bin_attrs);
+    }
+}
+
+static void demo_cleanup_glue_dir(struct demo_device *dev, 
+                                  struct kobject *glue_dir)
+{
+    /* see if we live in a 'glue' directory */
+    if (!glue_dir || !dev->class ||
+         glue_dir->kset != &dev->class->p->glue_dirs)
+        return;
+
+    kobject_put(glue_dir);
+}
+
+static void demo_cleanup_device_parent(struct demo_device *dev)
+{
+    demo_cleanup_glue_dir(dev, dev->kobj.parent);
+}
+
+static void demo_device_remove_sys_dev_entry(struct demo_device *dev)
+{
+    struct kobject *kobj = demo_device_to_dev_kobj(dev);
+    char devt_str[15];
+
+    if (kobj) {
+        format_dev_t(devt_str, dev->devt);
+        sysfs_remove_link(kobj, devt_str);
+    }
+}
+
+static void demo_device_remove_class_symlinks(struct demo_device *dev)
+{
+    if (!dev->class)
+        return;
+
+    if (dev->parent && demo_device_is_not_partition(dev))
+        sysfs_remove_link(&dev->kobj, "demo_device");
+    sysfs_remove_link(&dev->kobj, "demo_subsystem");
+    sysfs_delete_link(&dev->class->p->subsys.kobj, &dev->kobj,
+                      demo_dev_name(dev));
+}
+
 /* add demo device to device hierarchy */
 int demo_device_add(struct demo_device *dev)
 {
@@ -566,11 +695,11 @@ int demo_device_add(struct demo_device *dev)
 
     /* subsystem can specify simple device enumeration */
     if (!demo_dev_name(dev) && dev->bus && dev->bus->dev_name)
-        dev_set_name(dev, "%s%u", dev->bus->dev_name, dev->id);
+        demo_dev_set_name(dev, "%s%u", dev->bus->dev_name, dev->id);
 
     if (!demo_dev_name(dev)) {
         error = -EINVAL;
-        goto name_err;
+        goto name_error;
     }
     printk("demo device '%s'\n", demo_dev_name(dev));
 
@@ -597,8 +726,6 @@ int demo_device_add(struct demo_device *dev)
         error = demo_device_create_sys_dev_entry(dev);
         if (error)
             goto devtattrError;
-
-        devtmpfs_create_node(dev);
     }
 
     error = demo_device_add_class_symlinks(dev);
@@ -615,10 +742,49 @@ int demo_device_add(struct demo_device *dev)
      * before kobject_uevent */
     if (dev->bus)
         blocking_notifier_call_chain(&dev->bus->p->bus_notifier,
-              BUS_NOTIFY_ADD_DEVICE, dev);
+              DEMO_BUS_NOTIFY_ADD_DEVICE, dev);
 
     kobject_uevent(&dev->kobj, KOBJ_ADD);
     demo_bus_probe_device(dev); 
+    if (parent)
+        klist_add_tail(&dev->p->knode_parent,
+              &parent->p->klist_children);
+
+    if (dev->class) {
+        /* tie the class to the device */
+        klist_add_tail(&dev->knode_class,
+                       &dev->class->p->klist_devices);
+        /* notify any interfaces that the device is here */
+        list_for_each_entry(class_intf,
+                       &dev->class->p->interfaces, node)
+            if (class_intf->add_dev)
+                class_intf->add_dev(dev, class_intf);
+    }
+done:
+    demo_put_device(dev);
+BusError:
+    demo_device_remove_attrs(dev);
+AttrsError:
+    demo_device_remove_class_symlinks(dev);
+SymlinkError:
+    if (MAJOR(dev->devt))
+        demo_device_remove_sys_dev_entry(dev);
+devtattrError:
+    if (MAJOR(dev->devt))
+        demo_device_remove_file(dev, &demo_devt_attr);
+ueventattrError:
+    demo_device_remove_file(dev, &demo_uevent_attr);
+attrError:
+    kobject_uevent(&dev->kobj, KOBJ_REMOVE);
+    kobject_del(&dev->kobj);
+Error:
+    demo_cleanup_device_parent(dev);
+    if (parent)
+        demo_put_device(parent);
+name_error:
+    kfree(dev->p);
+    dev->p = NULL;
+    goto done;
 }
 
 /* register a demo device with the system */

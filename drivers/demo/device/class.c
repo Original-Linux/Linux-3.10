@@ -7,6 +7,10 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+
 #include "device.h"
 
 /* Hotplug events for demo classes go to the demo class subsys */
@@ -30,8 +34,8 @@ static const struct kobj_ns_type_operations *demo_class_dir_child_ns_type(
 
 static struct kobj_type demo_class_dir_ktype = {
     .release        = demo_class_dir_release,
-    .sysfs_ops      = &demo_kobj_sysfs_ops,
-    ,child_ns_type  = demo_class_dir_child_ns_type
+    .sysfs_ops      = &kobj_sysfs_ops,
+    .child_ns_type  = demo_class_dir_child_ns_type
 };
 
 struct kobject *demo_class_dir_create_and_add(struct demo_class *class,
@@ -45,13 +49,13 @@ struct kobject *demo_class_dir_create_and_add(struct demo_class *class,
         return NULL;
 
     dir->class = class;
-    kobject_init(&dir->kobj, &demo_class_ktype);
+    kobject_init(&dir->kobj, &demo_class_dir_ktype);
 
     dir->kobj.kset = &class->p->glue_dirs;
 
     retval = kobject_add(&dir->kobj, parent_kobj, "%s", class->name);
     if (retval < 0) {
-        kpbject_put(&dir->kobj);
+        kobject_put(&dir->kobj);
         return NULL;
     }
     return &dir->kobj;

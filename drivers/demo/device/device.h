@@ -6,6 +6,7 @@
 #include <linux/list.h>
 #include <linux/klist.h>
 #include <linux/sysfs.h>
+#include <linux/notifier.h>
 
 /* struct demo device */
 struct demo_device {
@@ -18,13 +19,15 @@ struct demo_device {
     const struct demo_device_type *type;
 
     struct demo_bus_type  *bus;        /* type of bus device is on */
-    struct demo_device_driver *driver; /* which driver has allocated this device */
+    struct demo_driver *driver; /* which driver has allocated this device */
 
     dev_t devt; /* dev_t, creates the sysfs "dev" */
     u32  id;   /* device instance */
 
     struct demo_class *class;
-    const struct attribute_group **group; /* optional groups */
+    struct list_head devres_head;
+    struct klist_node knode_class;
+    const struct attribute_group **groups; /* optional groups */
 
     void (*release)(struct demo_device *dev);
 };
@@ -60,14 +63,14 @@ struct demo_device_private {
 /* The type of device */
 struct demo_device_type {
     const char *name;
-    const struct demo_attribute_group **group;
+    const struct attribute_group **groups;
     int (*uevent)(struct demo_device *dev, struct kobj_uevent_env *env);
     char *(*devnode)(struct demo_device *dev, umode_t *mode);
     void (*release)(struct demo_device *dev);
 };
 
 /* The basic device driver structure */
-struct demo_device_driver {
+struct demo_driver {
     const char *name;
     struct demo_bus_type *bus;
 
@@ -78,13 +81,15 @@ struct demo_device_driver {
     void (*shutdown)(struct demo_device *dev);
     int (*resume)(struct demo_device *dev);
     const struct attribute_group **groups;
+
+    struct demo_driver_private *p;
 };
 
-struct demo_attribute_group {
-    const char *name;
-    umode_t    (*is_visible)(struct kobject *,
-                             struct attribute *, int);
-    struct attribute **attrs;
+struct demo_driver_private {
+    struct kobject kobj;
+    struct klist klist_devices;
+    struct klist_node knode_bus;
+    struct demo_driver *driver;
 };
 
 /* struct demo bus */
@@ -95,13 +100,15 @@ struct demo_bus_type {
     struct demo_bus_attribute *bus_attrs;
     struct demo_device_attribute *dev_attrs;
 
-    int (*match)(struct demo_device *dev, struct demo_device_driver *drv);
+    int (*match)(struct demo_device *dev, struct demo_driver *drv);
     int (*uevent)(struct demo_device *dev, struct kobj_uevent_env *env);
     int (*probe)(struct demo_device *dev);
     int (*remove)(struct demo_device *dev);
     void (*shutdown)(struct demo_device *dev);
 
     int (*resume)(struct demo_device *dev);
+    
+    struct demo_subsys_private *p;
 };
 
 /* attribute for bus */
@@ -116,6 +123,7 @@ struct demo_class {
 
     struct demo_class_attribute  *class_attrs;
     struct demo_device_attribute *dev_attrs;
+    struct bin_attribute *dev_bin_attrs;
     struct kobject *dev_kobj;
 
     int (*dev_uevent)(struct demo_device *dev, struct kobj_uevent_env *env);
@@ -128,6 +136,8 @@ struct demo_class {
 
     const struct kobj_ns_type_operations *ns_type;
     const void *(*namespace)(struct demo_device *dev);
+
+    struct demo_subsys_private *p;
 };
 
 /* attribute for class */
@@ -147,15 +157,35 @@ struct demo_class_dir {
     struct demo_class *class;
 };
 
+struct demo_class_interface {
+    struct list_head node;
+    struct demo_class *class;
+
+    int (*add_dev)(struct demo_device *, struct demo_class_interface *);
+    void (*remove_dev)(struct demo_device *, struct demo_class_interface *);
+};
+
+/* interface to device functions */
+struct demo_subsys_interface {
+    const char *name;
+    struct demo_bus_type *subsys;
+    struct list_head node;
+    int (*add_dev)(struct demo_device *dev, 
+                   struct demo_subsys_interface *sif);
+    int (*remove_dev)(struct demo_device *dev,
+                      struct demo_subsys_interface *sif);
+};
+
 /* hold the private to the driver core portions of the bus_type/class */
 struct demo_subsys_private {
     struct kset subsys;
-    struct kset *device_kset;
+    struct kset *devices_kset;
     struct list_head interfaces;
 
     struct kset *drivers_kset;
     struct klist klist_devices;
     struct klist klist_drivers;
+    struct blocking_notifier_head bus_notifier;
     unsigned int drivers_autoprobe:1;
     struct demo_bus_type *bus;
 
@@ -165,15 +195,10 @@ struct demo_subsys_private {
 #define demo_subsys_private(obj) container_of(obj, \
         struct demo_subsys_private, subsys.kobj)
 
-/* get demo device name */
-static inline const char *demo_dev_name(const struct demo_device *dev)
-{
-    /* Use the init name until the kobject becomes available */
-    if (dev->init_name)
-        return dev->init_name;
 
-    return kobject_name(&dev->kobj);
-}
+
+/* device resource management */
+typedef void (*demo_dr_release_t)(struct demo_device *dev, void *res);
 
 #define demo_to_dev(obj)     container_of(obj, struct demo_device, kobj)
 #define demo_to_attr(_attr)  container_of(_attr, struct demo_device_attribute, attr)
@@ -202,9 +227,30 @@ static inline const char *demo_dev_name(const struct demo_device *dev)
 #define DEMO_BUS_NOTIFY_UNBOUND_DRIVER    0x00000006   /* driver is 
                                              unbound from the device */
 
+/* get demo device name */
+static inline const char *demo_dev_name(const struct demo_device *dev)
+{
+    /* Use the init name until the kobject becomes available */
+    if (dev->init_name)
+        return dev->init_name;
+
+    return kobject_name(&dev->kobj);
+}
+
 static inline struct demo_device *demo_kobj_to_dev(struct kobject *kobj)
 {
-    return container_of(kobj, struct demo_device, kobk);
+    return container_of(kobj, struct demo_device, kobj);
+}
+
+static inline int demo_driver_match_device(struct demo_driver *drv,
+                  struct demo_device *dev)
+{
+    return drv->bus->match ? drv->bus->match(dev, drv) : 1;
+}
+
+static inline int demo_device_is_registered(struct demo_device *dev)
+{
+    return dev->kobj.state_in_sysfs;
 }
 
 /* root kset for /sys/demo_devices */
@@ -233,4 +279,31 @@ extern void demo_bus_probe_device(struct demo_device *dev);
 /* bind a demo driver to one demo device */
 extern int demo_device_bind_driver(struct demo_device *dev);
 
+/* try to attach demo device to a demo driver */
+extern int demo_device_attach(struct demo_device *dev);
+
+/* demo driver iterator */
+extern int demo_bus_for_each_drv(struct demo_bus_type *bus,
+                          struct demo_driver *start, void *data,
+            int (*fn)(struct demo_driver *, void *));
+
+/* Release all managed resources */
+extern int demo_devres_release_all(struct demo_device *dev);
+
+/* remove sysfs attribute file */
+extern void demo_device_remove_file(struct demo_device *dev,
+            const struct demo_device_attribute *attr);
+
+/* initialize demo device private data */
+extern int demo_device_private_init(struct demo_device *dev);
+
+/* decrement reference count */
+extern void demo_put_device(struct demo_device *dev);
+
+/* increment reference count for device */
+extern struct demo_device *demo_get_device(struct demo_device *dev);
+
+/* create sysfs attribute file for demo device. */
+extern int demo_device_create_file(struct demo_device *dev,
+                            const struct demo_device_attribute *attr);
 #endif

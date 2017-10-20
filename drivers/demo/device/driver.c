@@ -5,15 +5,18 @@
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/workqueu.h>
+#include <linux/workqueue.h>
 
 #include "device.h"
 
 static LIST_HEAD(demo_deferred_probe_pending_list);
-static LIST_HEAD(demo_deferred_active_list);
+static LIST_HEAD(demo_deferred_probe_active_list);
 static struct workqueue_struct *demo_deferred_wq;
 static atomic_t demo_deferred_trigger_count = ATOMIC_INIT(0);
 static bool demo_driver_deferred_probe_enable = false;
+
+static atomic_t demo_probe_count = ATOMIC_INIT(0);
+static DECLARE_WAIT_QUEUE_HEAD(demo_probe_waitqueue);
 
 static int demo_driver_sysfs_add(struct demo_device *dev)
 {
@@ -34,6 +37,16 @@ static int demo_driver_sysfs_add(struct demo_device *dev)
     return 0;
 }
 
+static void demo_driver_sysfs_remove(struct demo_device *dev)
+{
+    struct demo_driver *drv = dev->driver;
+
+    if (drv) {
+        sysfs_remove_link(&drv->p->kobj, kobject_name(&dev->kobj));
+        sysfs_remove_link(&dev->kobj, "demo_driver");
+    }
+}
+
 void demo_driver_deferred_probe_del(struct demo_device *dev)
 {
     if (!list_empty(&dev->p->deferred_probe)) {
@@ -42,11 +55,45 @@ void demo_driver_deferred_probe_del(struct demo_device *dev)
     }
 }
 
+/* Retry probing devices in the active list */
+static void demo_deferred_probe_work_func(struct work_struct *work)
+{
+    struct demo_device *dev;
+    struct demo_device_private *private;
+
+    /*
+     * This block processes every device in the deferred 'active' list.
+     * Each device is removed from the active list and passed to
+     * demo_bus_probe_device() to re-attempt the probe. The loop continues
+     * until every device in the active list is removed and retried.
+     *
+     * Note: Once the device is removed from the list and the mutex is 
+     * released, it is possible for the device get freed by another thread
+     * and cause a illegal pointer dereference. This code uses
+     * get/put_device() to ensurce the device structure cnanot disappera
+     * from under our feet.
+     */
+     while (!list_empty(&demo_deferred_probe_active_list)) {
+         private = list_first_entry(&demo_deferred_probe_active_list,
+                   typeof(*dev->p), deferred_probe);
+         dev = private->device;
+         list_del_init(&private->deferred_probe);
+
+         demo_get_device(dev);
+
+         demo_bus_probe_device(dev);
+         demo_put_device(dev);
+     }
+}
+
+static DECLARE_WORK(demo_deferred_probe_work,
+       demo_deferred_probe_work_func);
+
 /* kick off re-probing deferred devices */
 static void demo_driver_deferred_probe_trigger(void)
 {
     if (!demo_driver_deferred_probe_enable)
-        return 0;
+        return;
 
     /*
      * A successful probe means that all the devices in the pending list
@@ -109,7 +156,109 @@ static int demo_deferred_probe_initcall(void)
 }
 late_initcall(demo_deferred_probe_initcall);
 
-static int __demo_device_attach(struct demo_device_driver *drv, void *data)
+int demo_dev_set_drvdata(struct demo_device *dev, void *data)
+{
+    int error;
+
+    if (!dev->p) {
+        error = demo_device_private_init(dev);
+        if (error)
+            return error;
+    }
+    dev->p->driver_data = data;
+    return 0;
+}
+
+static void demo_driver_deferred_probe_add(struct demo_device *dev)
+{
+    if (list_empty(&dev->p->deferred_probe)) {
+        printk(KERN_DEBUG "Added %s to deferred list.\n", demo_dev_name(dev));
+        list_add_tail(&dev->p->deferred_probe, 
+                      &demo_deferred_probe_pending_list);
+    }
+}
+
+static int demo_really_probe(struct demo_device *dev, struct demo_driver *drv)
+{
+    int ret = 0;
+    int local_trigger_count = atomic_read(&demo_deferred_trigger_count);
+
+    atomic_inc(&demo_probe_count);
+    printk("bus'%s':%s:probing driver %s with device %s\n",
+            drv->bus->name, __func__, drv->name, demo_dev_name(dev));
+    WARN_ON(!list_empty(&dev->devres_head));
+
+    dev->driver = drv;
+
+    /* If using pinctrl, bind pins now before probing */
+    if (demo_driver_sysfs_add(dev)) {
+        printk(KERN_ERR "%s: driver_sysfs_add(%s) failed\n",
+               __func__, demo_dev_name(dev));
+        goto probe_failed;
+    }
+
+    if (dev->bus->probe) {
+        ret = dev->bus->probe(dev);
+        if (ret)
+            goto probe_failed;
+    } else if (drv->probe) {
+        ret = drv->probe(dev);
+        if (ret)
+            goto probe_failed;
+    }
+    demo_driver_bound(dev);
+    ret = 1;
+    printk(KERN_INFO "bus:'%s': %s:bound device %s to driver %s\n",
+           drv->bus->name, __func__, demo_dev_name(dev), drv->name);
+    goto done;
+
+probe_failed:
+    demo_devres_release_all(dev);
+    demo_driver_sysfs_remove(dev);
+    dev->driver = NULL;
+    demo_dev_set_drvdata(dev, NULL);
+
+    if (ret == -EPROBE_DEFER) {
+        /* Driver requested deferred probing */
+        printk(KERN_INFO "Driver %s requests probe deferral.\n", drv->name);
+        demo_driver_deferred_probe_add(dev);
+        /* Did a trigger occur while probing? Need to re-trigger if yes */
+        if (local_trigger_count != atomic_read(&demo_deferred_trigger_count))
+            demo_driver_deferred_probe_trigger();
+    } else if (ret != -ENODEV && ret != -ENXIO) {
+        /* driver matched but the probe failed */
+        printk(KERN_WARNING "%s: probe of %s failed with error %d\n",
+               drv->name, demo_dev_name(dev), ret);
+    } else {
+        printk(KERN_INFO "%s: probe of %s rejects match %d\n",
+               drv->name, demo_dev_name(dev), ret);
+    }
+    /*
+     * Ignore errors returned by->probe so that the next driver can try
+     * its luck.
+     */
+    ret = 0;
+done:
+    atomic_dec(&demo_probe_count);
+    wake_up(&demo_probe_waitqueue);
+    return ret;
+}
+
+/* attempt to bind demo device & driver together */
+int demo_driver_probe_device(struct demo_driver *drv, struct demo_device *dev)
+{
+    int ret = 0;
+
+    if (!demo_device_is_registered(dev))
+        return -ENODEV;
+
+    printk(KERN_INFO "demo bus:'%s':%s: matched device %s with driver %s\n",
+           drv->bus->name, __func__, demo_dev_name(dev), drv->name);
+    ret = demo_really_probe(dev, drv);
+    return ret;
+}
+
+static int __demo_device_attach(struct demo_driver *drv, void *data)
 {
     struct demo_device *dev = data;
 

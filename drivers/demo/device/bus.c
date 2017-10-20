@@ -18,7 +18,7 @@ static struct kset *demo_bus_kset;
 /* /sys/demo_device/system */
 static struct kset *demo_system_kset;
 
-static struct demo_bus_type *bus_get(struct demo_bus_type *bus)
+static struct demo_bus_type *demo_bus_get(struct demo_bus_type *bus)
 {
     if (bus) {
         kset_get(&bus->p->subsys);
@@ -33,6 +33,37 @@ static void demo_bus_put(struct demo_bus_type *bus)
         kset_put(&bus->p->subsys);
 }
 
+static void demo_device_remove_attrs(struct demo_bus_type *bus, 
+                                     struct demo_device *dev)
+{
+    int i;
+
+    if (bus->dev_attrs) {
+        for (i = 0; attr_name(bus->dev_attrs[i]); i++)
+            demo_device_remove_file(dev, &bus->dev_attrs[i]);
+    }
+}
+
+static int demo_device_add_attrs(struct demo_bus_type *bus,
+                                 struct demo_device *dev)
+{
+    int error = 0;
+    int i;
+
+    if (!bus->dev_attrs)
+        return 0;
+
+    for (i = 0; attr_name(bus->dev_attrs[i]); i++) {
+        error = demo_device_create_file(dev, &bus->dev_attrs[i]);
+        if (error) {
+            while (--i >= 0)
+                demo_device_remove_file(dev, &bus->dev_attrs[i]);
+            break;
+        }
+    }
+    return error;
+}
+
 /* add device to bus */
 int demo_bus_add_device(struct demo_device *dev)
 {
@@ -45,7 +76,7 @@ int demo_bus_add_device(struct demo_device *dev)
         error = demo_device_add_attrs(bus, dev);
         if (error)
             goto out_put;
-        error = sys_create_link(&bus->p->devices_kset->kobj,
+        error = sysfs_create_link(&bus->p->devices_kset->kobj,
                 &dev->kobj, demo_dev_name(dev));
         if (error)
             goto out_id;
@@ -53,8 +84,6 @@ int demo_bus_add_device(struct demo_device *dev)
     }
     return 0;
 
-out_subsys:
-    sysfs_remove_link(&bus->p->devices_kset->kobj, demo_dev_name(dev));
 out_id:
     demo_device_remove_attrs(bus, dev);
 out_put:
@@ -81,7 +110,7 @@ void demo_bus_probe_device(struct demo_device *dev)
             sif->add_dev(dev, sif);
 }
 
-static struct demo_device_driver *demo_next_driver(struct klist_iter *i)
+static struct demo_driver *demo_next_driver(struct klist_iter *i)
 {
     struct klist_node *n = klist_next(i);
     struct demo_driver_private *drv_priv;
@@ -95,11 +124,11 @@ static struct demo_device_driver *demo_next_driver(struct klist_iter *i)
 
 /* demo driver iterator */
 int demo_bus_for_each_drv(struct demo_bus_type *bus, 
-                          struct demo_device_driver *start, void *data,
-            int (*fn)(struct demo_device_driver *, void *))
+                          struct demo_driver *start, void *data,
+            int (*fn)(struct demo_driver *, void *))
 {
     struct klist_iter i;
-    struct demo_device_driver *drv;
+    struct demo_driver *drv;
     int error = 0;
 
     if (!bus)
