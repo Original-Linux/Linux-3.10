@@ -12,6 +12,9 @@
 
 #include "device.h"
 
+struct kobject *demo_sysfs_dev_char_kobj;
+struct kobject *demo_sysfs_dev_block_kobj;
+
 struct kobject *demo_virtual_device_parent(struct demo_device *dev)
 {
     static struct kobject *virtual_dir = NULL;

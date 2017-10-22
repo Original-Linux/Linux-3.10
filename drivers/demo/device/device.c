@@ -215,7 +215,7 @@ static void demo_klist_children_get(struct klist_node *n)
     struct demo_device_private *p = demo_to_device_private_parent(n);
     struct demo_device *dev = p->device;
 
-    get_device(dev);
+    demo_get_device(dev);
 }
 
 static void demo_klist_children_put(struct klist_node *n)
@@ -233,7 +233,7 @@ int demo_device_private_init(struct demo_device *dev)
     if (!dev->p)
         return -ENOMEM;
     dev->p->device = dev;
-    klist_init(&dev->p->list_children, demo_klist_children_get,
+    klist_init(&dev->p->klist_children, demo_klist_children_get,
                demo_klist_children_put);
     INIT_LIST_HEAD(&dev->p->deferred_probe);
     return 0;
@@ -247,7 +247,7 @@ int demo_dev_set_name(struct demo_device *dev, const char *fmt, ...)
 
     va_start(vargs, fmt);
     err = kobject_set_name_vargs(&dev->kobj, fmt, vargs);
-    va_end(args);
+    va_end(vargs);
 
     return err;
 }
@@ -266,7 +266,7 @@ static struct kobject *demo_get_device_parent(struct demo_device *dev,
          * in a "glue" direntory to prevent namespace collisions.
          */
         if (parent == NULL)
-            parent_kobj = demo_virtal_device_parent(dev);
+            parent_kobj = demo_virtual_device_parent(dev);
         else if (parent->class && !dev->class->ns_type)
             return &parent->kobj;
         else
@@ -331,7 +331,7 @@ static struct kobject *demo_device_to_dev_kobj(struct demo_device *dev)
     if (dev->class)
         kobj = dev->class->dev_kobj;
     else
-        kobj = sysfs_dev_char_kobj;
+        kobj = demo_sysfs_dev_char_kobj;
 
     return kobj;
 }
@@ -344,7 +344,7 @@ static int demo_device_create_sys_dev_entry(struct demo_device *dev)
 
     if (kobj) {
         format_dev_t(devt_str, dev->devt);
-        error = sys_create_link(kobj, &dev->kobj, devt_str);
+        error = sysfs_create_link(kobj, &dev->kobj, devt_str);
     }
     return error;
 }
@@ -432,13 +432,13 @@ void demo_device_remove_bin_file(struct demo_device *dev,
 }
 
 static int demo_device_add_bin_attributes(struct demo_device *dev,
-           struct bin_attribute *attr)
+           struct bin_attribute *attrs)
 {
     int error = 0;
     int i;
 
     if (attrs) {
-        for (i = 0; attr_name[attrs[i]]; i++) {
+        for (i = 0; attr_name(attrs[i]); i++) {
             error = demo_device_create_bin_file(dev, &attrs[i]);
             if (error)
                 break;
@@ -451,7 +451,7 @@ static int demo_device_add_bin_attributes(struct demo_device *dev,
 }
 
 static void demo_device_remove_bin_attributes(struct demo_device *dev,
-            struct bin_attribute *attr)
+            struct bin_attribute *attrs)
 {
     int i;
 
@@ -471,7 +471,7 @@ static int demo_device_add_groups(struct demo_device *dev,
             error = sysfs_create_group(&dev->kobj, groups[i]);
             if (error) {
                 while (--i >= 0)
-                    sysfs_remove_group(&dev->kobj, greoups[i]);
+                    sysfs_remove_group(&dev->kobj, groups[i]);
                 break;
             }
         }
@@ -485,7 +485,7 @@ static void demo_device_remove_groups(struct demo_device *dev,
     int i;
 
     if (groups)
-        for (i = 0; groups[i]l i++)
+        for (i = 0; groups[i]; i++)
             sysfs_remove_group(&dev->kobj, groups[i]);
 }
 
@@ -528,17 +528,6 @@ err_remove_class_attrs:
 
     return error;
 } 
-
-/* bind a demo driver to one demo device */
-int demo_device_bind_driver(struct demo_device *dev)
-{
-    int ret;
-
-    ret = demo_driver_sysfs_add(dev);
-    if (!ret)
-        demo_driver_bound(dev);
-    return ret;
-}
 
 static ssize_t demo_show_dev(struct demo_device *dev, 
                struct demo_device_attribute *attr, char *buf)
@@ -792,6 +781,52 @@ int demo_device_register(struct demo_device *dev)
 {
     demo_device_initialize(dev);
     return demo_device_add(dev);
+}
+
+/* delete demo device from system */
+void demo_device_del(struct demo_device *dev)
+{
+    struct demo_device *parent = dev->parent;
+    struct demo_class_interface *class_intf;
+
+    /* Notify client of device removal. */
+    if (dev->bus)
+        blocking_notifier_call_chain(&dev->bus->p->bus_notifier,
+               DEMO_BUS_NOTIFY_DEL_DEVICE, dev);
+    if (parent)
+        klist_del(&dev->p->knode_parent);
+    if (MAJOR(dev->devt)) {
+        demo_device_remove_sys_dev_entry(dev);
+        demo_device_remove_file(dev, &demo_devt_attr);
+    }
+    if (dev->class) {
+        demo_device_remove_class_symlinks(dev);
+
+        /* notify any interface that the device is now gone. */
+        list_for_each_entry(class_intf,
+                 &dev->class->p->interface, node)
+            if (class_intf->remove_dev)
+                class_intf->remove_dev(dev, class_intf);
+        /* remove the device from the class list */
+        klist_del(&dev->knode_class);
+    }
+    demo_device_remove_file(dev, &demo_uevent_attr);
+    demo_device_remove_attrs(dev);
+    demo_bus_remove_device(dev);
+    demo_driver_deferred_probe_del(dev);
+
+    kobject_uevent(&dev->kobj, KOBJ_REMOVE);
+    demo_cleanup_device_parent(dev);
+    kobject_del(&dev->kobj);
+    demo_put_device(parent);
+}
+
+/* unregister demo device from system */
+void demo_device_unregister(struct demo_device *dev)
+{
+    printk(KERN_INFO "demo device: '%s'\n", demo_dev_name(dev));
+    demo_device_del(dev);
+    demo_put_device(dev);
 }
 
 static const struct sysfs_ops demo_dev_sysfs_ops = {

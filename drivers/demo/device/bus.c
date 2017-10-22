@@ -142,6 +142,32 @@ int demo_bus_for_each_drv(struct demo_bus_type *bus,
     return error;
 }
 
+/* remove demo device from demo bus */
+void demo_bus_remove_device(struct demo_device *dev)
+{
+    struct demo_bus_type *bus = dev->bus;
+    struct demo_subsys_interface *sif;
+
+    if (!bus)
+        return;
+
+    list_for_each_entry(sif, &bus->p->interface, node)
+        if (sif->remove_dev)
+            sif->remove_dev(dev, sif);
+
+    demo_sysfs_remove_link(&dev->kobj, "demo_subsystem");
+    demo_sysfs_remove_link(&dev->bus->p->devices_kset->kobj,
+               demo_dev_name(dev));
+    demo_device_remove_attrs(dev->bus, dev);
+    if (klist_node_attached(&dev->p->knode_bus))
+        klist_del(&dev->p->knode_bus);
+
+    printk(KERN_INFO "bus: '%s': remove device %s\n",
+                dev->bus->name, demo_dev_name(dev));
+    demo_device_release_driver(dev);
+    demo_bus_put(dev->bus);
+}
+
 /* sysfs bindings for buses */
 static ssize_t demo_bus_attr_show(struct kobject *kobj, 
                struct attribute *attr, char *buf)

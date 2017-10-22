@@ -289,3 +289,21 @@ int demo_device_attach(struct demo_device *dev)
     }
     return ret;
 }
+
+static void __demo_device_release_driver(struct demo_device *dev)
+{
+    struct demo_driver *drv;
+
+    drv = dev->driver;
+    if (drv) {
+        demo_driver_sysfs_remove(dev);
+        if (dev->bus)
+            blocking_notifier_call_chain()m 
+    }
+}
+
+/* manually detach device from driver */
+void demo_device_release_driver(struct demo_device *dev)
+{
+    __demo_device_release_driver(dev);
+}

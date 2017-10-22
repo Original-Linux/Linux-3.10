@@ -204,14 +204,6 @@ typedef void (*demo_dr_release_t)(struct demo_device *dev, void *res);
 #define demo_to_attr(_attr)  container_of(_attr, struct demo_device_attribute, attr)
 
 /*
- * Some programs want their definitions of MAJOR and MINOR and MKDEV
- * from the kernel source. These must be the externally visible ones.
- */
-#define MAJOR(dev)       ((dev) >> 8)
-#define MINOR(dev)       ((dev) & 0xff)
-#define MKDEV(ma,mi)     ((ma)<<8|(mi))
-
-/*
  * All 4 notifers below get called with the target struct device
  * as an argument. Note that those functions are likely to be called
  * with the device lock held in the core, so be careful.
@@ -262,6 +254,9 @@ extern int __init demo_device_init(void);
 /* demo bus initialization entry */
 extern int __init demo_buses_init(void);
 
+extern struct kobject *demo_sysfs_dev_char_kobj;
+extern struct kobject *demo_sysfs_dev_block_kobj;
+
 /* demo class initialization entry */
 extern int __init demo_classes_init(void);
 
@@ -306,4 +301,7 @@ extern struct demo_device *demo_get_device(struct demo_device *dev);
 /* create sysfs attribute file for demo device. */
 extern int demo_device_create_file(struct demo_device *dev,
                             const struct demo_device_attribute *attr);
+
+extern struct kobject *demo_class_dir_create_and_add(struct demo_class *class,
+                struct kobject *parent_kobj);
 #endif
