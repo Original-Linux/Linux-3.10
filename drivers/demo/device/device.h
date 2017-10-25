@@ -7,6 +7,7 @@
 #include <linux/klist.h>
 #include <linux/sysfs.h>
 #include <linux/notifier.h>
+#include <linux/mutex.h>
 
 /* struct demo device */
 struct demo_device {
@@ -18,15 +19,19 @@ struct demo_device {
     const char *init_name;   /* initial name of the device */
     const struct demo_device_type *type;
 
+    struct mutex          mutex;       /* mutex to synchronize calls to 
+                                        * its driver */
     struct demo_bus_type  *bus;        /* type of bus device is on */
     struct demo_driver *driver; /* which driver has allocated this device */
 
     dev_t devt; /* dev_t, creates the sysfs "dev" */
     u32  id;   /* device instance */
 
-    struct demo_class *class;
+    spinlock_t devres_lock;
     struct list_head devres_head;
+
     struct klist_node knode_class;
+    struct demo_class *class;
     const struct attribute_group **groups; /* optional groups */
 
     void (*release)(struct demo_device *dev);
@@ -245,6 +250,15 @@ static inline int demo_device_is_registered(struct demo_device *dev)
     return dev->kobj.state_in_sysfs;
 }
 
+static inline void demo_set_dev_node(struct demo_device *dev, int node)
+{
+}
+
+static inline int demo_dev_to_node(struct demo_device *dev)
+{
+    return -1;
+}
+
 /* root kset for /sys/demo_devices */
 extern struct kset *demo_devices_kset;;
 
@@ -304,4 +318,18 @@ extern int demo_device_create_file(struct demo_device *dev,
 
 extern struct kobject *demo_class_dir_create_and_add(struct demo_class *class,
                 struct kobject *parent_kobj);
+
+extern void demo_driver_deferred_probe_del(struct demo_device *dev);
+
+/* remove demo device from demo bus */
+extern void demo_bus_remove_device(struct demo_device *dev);
+
+/* manually detach device from driver */
+extern void demo_device_release_driver(struct demo_device *dev);
+
+/* register a demo device with the system */
+extern int demo_device_register(struct demo_device *dev);
+
+/* unregister demo device from system */
+extern void demo_device_unregister(struct demo_device *dev);
 #endif

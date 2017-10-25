@@ -298,7 +298,20 @@ static void __demo_device_release_driver(struct demo_device *dev)
     if (drv) {
         demo_driver_sysfs_remove(dev);
         if (dev->bus)
-            blocking_notifier_call_chain()m 
+            blocking_notifier_call_chain(&dev->bus->p->bus_notifier,
+               DEMO_BUS_NOTIFY_UNBIND_DRIVER, dev);
+
+        if (dev->bus && dev->bus->remove)
+            dev->bus->remove(dev);
+        else if (drv->remove)
+            drv->remove(dev);
+        demo_devres_release_all(dev);
+        dev->driver = NULL;
+        demo_dev_set_drvdata(dev, NULL);
+        klist_remove(&dev->p->knode_driver);
+        if (dev->bus)
+            blocking_notifier_call_chain(&dev->bus->p->bus_notifier,
+                DEMO_BUS_NOTIFY_UNBOUND_DRIVER, dev); 
     }
 }
 

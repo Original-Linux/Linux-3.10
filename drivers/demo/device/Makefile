@@ -4,3 +4,4 @@ obj-$(CONFIG_DEMO_DEVICE_CORE)   += bus.o
 obj-$(CONFIG_DEMO_DEVICE_CORE)   += class.o
 obj-$(CONFIG_DEMO_DEVICE_CORE)   += driver.o
 obj-$(CONFIG_DEMO_DEVICE_CORE)   += devres.o
+obj-$(CONFIG_DEMO_DEVICE_CORE)   += demo_device.o

@@ -194,9 +194,20 @@ void demo_device_initialize(struct demo_device *dev)
     dev->kobj.kset = demo_devices_kset;
     kobject_init(&dev->kobj, &demo_device_ktype);
     INIT_LIST_HEAD(&dev->devres_head);
+    mutex_init(&dev->mutex);
+    spin_lock_init(&dev->devres_lock);
+    INIT_LIST_HEAD(&dev->devres_head);
+    demo_set_dev_node(dev, -1);
 }
 
-/* increment reference count for device */
+/* 
+ * increment reference count for device 
+ * @dev: demo devicec
+ *
+ * This simply forwards the call to kobject_get(), though
+ * we do take care to provide for the case that we get a NULL
+ * pointer passed in.
+ */
 struct demo_device *demo_get_device(struct demo_device *dev)
 {
     return dev ? demo_kobj_to_dev(kobject_get(&dev->kobj)) : NULL;
@@ -364,6 +375,8 @@ static int demo_device_add_class_symlinks(struct demo_device *dev)
                   &dev->class->p->subsys.kobj, "demo_subsystem");
     if (error)
         goto out;
+
+    /* Note! no verify */
     if (dev->parent && demo_device_is_not_partition(dev)) {
         error = sysfs_create_link(&dev->kobj, &dev->parent->kobj,
                                   "demo_device");
@@ -466,6 +479,7 @@ static int demo_device_add_groups(struct demo_device *dev,
     int error = 0;
     int i;
 
+    /* Note! no verify */
     if (groups) {
         for (i = 0; groups[i]; i++) {
             error = sysfs_create_group(&dev->kobj, groups[i]);
@@ -495,6 +509,7 @@ static int demo_device_add_attrs(struct demo_device *dev)
     const struct demo_device_type *type = dev->type;
     int error;
 
+    /* Note! no verify */
     if (class) {
         error = demo_device_add_attributes(dev, class->dev_attrs);
         if (error)
@@ -504,6 +519,7 @@ static int demo_device_add_attrs(struct demo_device *dev)
             goto err_remove_class_attrs;
     }
 
+    /* Note! no verify */
     if (type) {
         error = demo_device_add_groups(dev, type->groups);
         if (error)
@@ -609,9 +625,11 @@ static void demo_device_remove_attrs(struct demo_device *dev)
 
     demo_device_remove_groups(dev, dev->groups);
 
+    /* Note! no verify */
     if (type)
         demo_device_remove_groups(dev, type->groups);
 
+    /* Note! no verify */
     if (class) {
         demo_device_remove_attributes(dev, class->dev_attrs);
         demo_device_remove_bin_attributes(dev, class->dev_bin_attrs);
@@ -669,11 +687,13 @@ int demo_device_add(struct demo_device *dev)
     if (!dev)
         goto done;
 
+    /* Note! demo device must clear when dynamic allocate. */
     if (!dev->p) {
         error = demo_device_private_init(dev);
         if (error)
             goto done;
     }
+
     /* for statically allocated devices, which should all be converted
      * some day, we need to initiailze the name. We prevent reading back
      * the name, and force the use of dev_name() */
@@ -682,6 +702,7 @@ int demo_device_add(struct demo_device *dev)
         dev->init_name = NULL;
     }
 
+    /* Note! non verify */
     /* subsystem can specify simple device enumeration */
     if (!demo_dev_name(dev) && dev->bus && dev->bus->dev_name)
         demo_dev_set_name(dev, "%s%u", dev->bus->dev_name, dev->id);
@@ -697,6 +718,10 @@ int demo_device_add(struct demo_device *dev)
     if (kobj)
         dev->kobj.parent = kobj;
 
+    /* use parent numa_node */
+    if (parent)
+        demo_set_dev_node(dev, demo_dev_to_node(parent));
+
     /* first, register with generic layer. */
     /* We require the name to be set before, and pass NULL */
     error = kobject_add(&dev->kobj, dev->kobj.parent, NULL);
@@ -707,6 +732,7 @@ int demo_device_add(struct demo_device *dev)
     if (error)
         goto attrError;
 
+    /* Note! no verify */
     if (MAJOR(dev->devt)) {
         error = demo_device_create_file(dev, &demo_devt_attr);
         if (error)
@@ -720,6 +746,8 @@ int demo_device_add(struct demo_device *dev)
     error = demo_device_add_class_symlinks(dev);
     if (error)
         goto SymlinkError;
+    printk(KERN_INFO "'%s' create class link.\n", demo_dev_name(dev));
+
     error = demo_device_add_attrs(dev);
     if (error)
         goto AttrsError;
@@ -727,6 +755,7 @@ int demo_device_add(struct demo_device *dev)
     if (error)
         goto BusError;
 
+    /* Note! no verify */
     /* Notify clients of device addition. This call must come
      * before kobject_uevent */
     if (dev->bus)
@@ -734,11 +763,14 @@ int demo_device_add(struct demo_device *dev)
               DEMO_BUS_NOTIFY_ADD_DEVICE, dev);
 
     kobject_uevent(&dev->kobj, KOBJ_ADD);
+    /* Note! non-verify */
     demo_bus_probe_device(dev); 
+    /* Note! no verify */
     if (parent)
         klist_add_tail(&dev->p->knode_parent,
               &parent->p->klist_children);
 
+    /* Note! no verify */
     if (dev->class) {
         /* tie the class to the device */
         klist_add_tail(&dev->knode_class,
@@ -751,6 +783,7 @@ int demo_device_add(struct demo_device *dev)
     }
 done:
     demo_put_device(dev);
+    return error;
 BusError:
     demo_device_remove_attrs(dev);
 AttrsError:
@@ -789,22 +822,26 @@ void demo_device_del(struct demo_device *dev)
     struct demo_device *parent = dev->parent;
     struct demo_class_interface *class_intf;
 
+    /* Note! no verify */
     /* Notify client of device removal. */
     if (dev->bus)
         blocking_notifier_call_chain(&dev->bus->p->bus_notifier,
                DEMO_BUS_NOTIFY_DEL_DEVICE, dev);
+    /* Note! no verify */
     if (parent)
         klist_del(&dev->p->knode_parent);
+    /* Note! no verify */
     if (MAJOR(dev->devt)) {
         demo_device_remove_sys_dev_entry(dev);
         demo_device_remove_file(dev, &demo_devt_attr);
     }
+    /* Note! no verify */
     if (dev->class) {
         demo_device_remove_class_symlinks(dev);
 
         /* notify any interface that the device is now gone. */
         list_for_each_entry(class_intf,
-                 &dev->class->p->interface, node)
+                 &dev->class->p->interfaces, node)
             if (class_intf->remove_dev)
                 class_intf->remove_dev(dev, class_intf);
         /* remove the device from the class list */
@@ -826,7 +863,7 @@ void demo_device_unregister(struct demo_device *dev)
 {
     printk(KERN_INFO "demo device: '%s'\n", demo_dev_name(dev));
     demo_device_del(dev);
-    demo_put_device(dev);
+    //demo_put_device(dev);
 }
 
 static const struct sysfs_ops demo_dev_sysfs_ops = {
